@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Nov 19 19:48:48 2023
+
+@author: ravnic
+"""
+
+import pandas_datareader.data as reader 
+import pandas as pd 
+import datetime as dt 
+import statsmodels.api as sm
+import yfinance 
+from sklearn.linear_model import Ridge, Lasso
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+from keras.models import Sequential
+from keras.layers import Dense
+import matplotlib.pyplot as plt
+from keras.wrappers.scikit_learn import KerasRegressor
+from sklearn.linear_model import ElasticNet
+from keras.layers import LSTM, SimpleRNN
+import numpy as np
+from scipy.optimize import minimize
+import seaborn as sns
+import riskfolio as rp
+
+# Exemple de fonction pour calculer la matrice de corrélation
+def calculate_correlation_matrix(y_pred_dict):
+    returns = np.array([y_pred.flatten() for y_pred in y_pred_dict.values()])
+    return np.corrcoef(returns)
+
+
+# Exemple de fonction d'optimisation pour les poids du portefeuille
+def portfolio_variance(weights, covariance_matrix):
+    return weights.T @ covariance_matrix @ weights
+
+def optimize_portfolio(returns, covariance_matrix):
+    num_assets = len(returns)
+    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+    bounds = tuple((0, 1) for _ in range(num_assets))
+    initial_weights = np.array(num_assets * [1. / num_assets])
+    result = minimize(portfolio_variance, initial_weights, args=(covariance_matrix,), method='SLSQP', bounds=bounds, constraints=constraints)
+    return result.x
+
+
+
+# Fonction pour créer un modèle MLP
+def create_mlp(input_dim):
+    model = Sequential()
+    model.add(Dense(10, input_dim=input_dim, activation='relu'))
+    model.add(Dense(1, activation='linear'))
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+
+# Fonction pour créer un modèle RNN
+def create_rnn(input_dim):
+    model = Sequential()
+    model.add(SimpleRNN(10, input_shape=(1, input_dim)))
+    model.add(Dense(1))
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+
+# Fonction pour créer un modèle LSTM
+def create_lstm(input_dim):
+    model = Sequential()
+    model.add(LSTM(10, input_shape=(1, input_dim)))
+    model.add(Dense(1))
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+
+
+
+end = dt.date(2020,6,30) 
+start = dt.date(end.year -10, end.month, end.day)
+
+funds = ["GLE.PA"] 
+actions = ['ACA.PA','TEP.PA','RMS.PA','SAF.PA','AI.PA','CA.PA','TTE.PA','OR.PA','EN.PA','SAN.PA','CS.PA','BN.PA','RI.PA','MC.PA','HO.PA',          'KER.PA','EL.PA','SU.PA','VIE.PA','SGO.PA','CAP.PA','DG.PA','PUB.PA','GLE.PA','BNP.PA','RNO.PA','ORA.PA','ENGI.PA','ALO.PA','LR.PA']
+
+#actions = ['ACA.PA','TEP.PA','RMS.PA','SAF.PA','AI.PA','CA.PA','TTE.PA','OR.PA','EN.PA','SAN.PA']
+
+#factors = reader.DataReader('F-F_Research_Data_Factors','famafrench',start,end)[0]
+factors = reader.DataReader('F-F_Research_Data_5_Factors_2x3','famafrench',start,end)[0]
+
+
+factors = factors[1:]
+factors.shape
+
+# Téléchargement des données pour chaque action
+all_funds_data = {}
+for fund in actions:
+    df = yfinance.download(fund, start, end)
+    fundsret = df[['Adj Close']].pct_change()
+    fundsret_mtl = fundsret.resample('M').agg(lambda x: (x+1).prod()-1)
+    all_funds_data[fund] = fundsret_mtl[1:]
+
+
+
+# Fusionner les rendements des actions avec les facteurs
+for fund, fundsret_mtl in all_funds_data.items():
+    fundsret_mtl.index = factors.index
+    merge = pd.merge(fundsret_mtl, factors, left_index=True, right_index=True)
+    merge[['Mkt-RF', 'SMB', 'HML', 'RF', 'RMW', 'CMA']] = merge[['Mkt-RF', 'SMB', 'HML', 'RF', 'RMW', 'CMA']] / 100
+    merge[f'{fund}-RF'] = merge['Adj Close'] - merge['RF']
+    all_funds_data[fund] = merge
+
+
+model_performance = {}
+y_pred_lin_dict = {}
+y_pred_ridge_dict = {}
+y_pred_lasso_dict = {}
+y_pred_elastic_net_dict = {}
+y_pred_mlp_dict = {}
+y_pred_rnn_dict = {}
+y_pred_lstm_dict = {}
+
+
+
+for fund, merge in all_funds_data.items():
+    y = merge[f'{fund}-RF']
+    X = merge[['Mkt-RF', 'SMB', 'HML', 'RMW', 'CMA']]
+    merge.index = merge.index.to_timestamp()
+    
+    # Régression linéaire
+    X_sm = sm.add_constant(X)
+    model_lin = sm.OLS(y, X_sm)
+    results_lin = model_lin.fit()
+    y_pred_lin = results_lin.predict(X_sm)
+    mse_lin = mean_squared_error(y, y_pred_lin)
+
+
+    # Régression Ridge
+    model_ridge = Ridge(alpha=1.0)
+    model_ridge.fit(X, y)
+    y_pred_ridge = model_ridge.predict(X)
+    mse_ridge = mean_squared_error(y, y_pred_ridge)
+
+    
+    # Régression Lasso
+    model_lasso = Lasso(alpha=0.1)
+    model_lasso.fit(X, y)
+    y_pred_lasso = model_lasso.predict(X)
+    mse_lasso = mean_squared_error(y, y_pred_lasso)
+
+
+
+    # Régression Elastic Net
+    elastic_net = ElasticNet(alpha=0.1, l1_ratio=0.5)  # Vous pouvez ajuster alpha et l1_ratio
+    elastic_net.fit(X, y)
+    y_pred_elastic_net = elastic_net.predict(X)
+    mse_elastic_net = mean_squared_error(y, y_pred_elastic_net)
+
+    
+    
+    # Modèle MLP
+    mlp = create_mlp(X.shape[1])
+    mlp.fit(X, y, epochs=50, batch_size=10, verbose=0)
+    y_pred_mlp = mlp.predict(X)
+    mse_mlp = mean_squared_error(y, y_pred_mlp.flatten())
+
+
+    # Modèle RNN
+    rnn = create_rnn(X.shape[1])
+    rnn.fit(X.values.reshape(-1, 1, X.shape[1]), y, epochs=50, batch_size=10, verbose=0)
+    y_pred_rnn = rnn.predict(X.values.reshape(-1, 1, X.shape[1]))
+    mse_rnn = mean_squared_error(y, y_pred_rnn.flatten())
+
+
+    # Modèle LSTM
+    lstm = create_lstm(X.shape[1])
+    lstm.fit(X.values.reshape(-1, 1, X.shape[1]), y, epochs=50, batch_size=10, verbose=0)
+    y_pred_lstm = lstm.predict(X.values.reshape(-1, 1, X.shape[1]))
+    mse_lstm = mean_squared_error(y, y_pred_lstm.flatten())
+
+    model_performance[fund] = {
+        'Linear': mse_lin,
+        'Ridge': mse_ridge,
+        'Lasso': mse_lasso,
+        'Elastic Net': mse_elastic_net,
+        'MLP': mse_mlp,
+        'RNN': mse_rnn,
+        'LSTM': mse_lstm
+    }
+    
+
+    
+    # Affichage des résultats
+    plt.figure(figsize=(12, 8))
+    plt.scatter(merge.index, y, color='blue', label='Rendements Réels')
+    plt.plot(merge.index, y_pred_lin, color='green', label='Régression Linéaire')
+    plt.plot(merge.index, y_pred_ridge, color='red', label='Ridge')
+    plt.plot(merge.index, y_pred_lasso, color='purple', label='Lasso')
+    plt.plot(merge.index, y_pred_elastic_net, color='brown', label='Elastic Net')
+    plt.plot(merge.index, y_pred_mlp.flatten(), color='orange', label='MLP')
+    plt.plot(merge.index, y_pred_rnn.flatten(), color='pink', label='RNN')
+    plt.plot(merge.index, y_pred_lstm.flatten(), color='cyan', label='LSTM')
+    plt.title(f'Comparaison des Rendements pour {fund}')
+    plt.xlabel('Date')
+    plt.ylabel('Rendements')
+    plt.legend()
+    plt.show()
+    
+    y_pred_lin_dict[fund] = y_pred_lin
+    y_pred_ridge_dict[fund] = y_pred_ridge
+    y_pred_lasso_dict[fund] = y_pred_lasso
+    y_pred_elastic_net_dict[fund] = y_pred_elastic_net
+    y_pred_mlp_dict[fund] = y_pred_mlp.flatten()
+    y_pred_rnn_dict[fund] = y_pred_rnn.flatten()
+    y_pred_lstm_dict[fund] = y_pred_lstm.flatten()
+
+
+
+#fig, axes = plt.subplots(nrows=6, ncols=5, figsize=(20, 16))
+fig, axes = plt.subplots(nrows=len(actions)//5, ncols=5, figsize=(20, 16))
+
+fig.suptitle('Comparaison des Modèles pour Chaque Action')
+
+axes = axes.flatten()  # Aplatir le tableau d'axes
+
+for i, fund in enumerate(actions):
+    ax = axes[i]
+    y = all_funds_data[fund][f'{fund}-RF']
+    X = all_funds_data[fund].index
+
+    # Tracé des prédictions de chaque modèle pour l'action courante
+    ax.plot(X, y_pred_lin_dict[fund], color='green')
+    ax.plot(X, y_pred_ridge_dict[fund], color='red')
+    ax.plot(X, y_pred_lasso_dict[fund], color='purple')
+    ax.plot(X, y_pred_elastic_net_dict[fund], color='brown')
+    ax.plot(X, y_pred_mlp_dict[fund], color='orange')
+    ax.plot(X, y_pred_rnn_dict[fund], color='pink')
+    ax.plot(X, y_pred_lstm_dict[fund], color='cyan')
+    ax.scatter(X, y, color='blue')
+    
+    ax.set_title(fund)
+    ax.label_outer()  # Cacher les labels internes pour plus de clarté
+
+custom_lines = [plt.Line2D([0], [0], color='green', lw=2),
+                plt.Line2D([0], [0], color='red', lw=2),
+                plt.Line2D([0], [0], color='purple', lw=2),
+                plt.Line2D([0], [0], color='brown', lw=2),
+                plt.Line2D([0], [0], color='orange', lw=2),
+                plt.Line2D([0], [0], color='pink', lw=2),
+                plt.Line2D([0], [0], color='cyan', lw=2),
+                plt.Line2D([0], [0], color='blue', lw=2, marker='o')]
+
+fig.legend(custom_lines, ['Régression Linéaire', 'Ridge', 'Lasso', 'Elastic Net', 'MLP', 'RNN', 'LSTM', 'Rendements Réels'], 
+           loc='upper left', bbox_to_anchor=(0.1, 0.95))
+
+# Ajuster l'espacement
+plt.tight_layout()
+plt.subplots_adjust(top=0.95)
+plt.show()
+
+
+for fund in model_performance:
+    # Trouver le modèle avec le MSE le plus bas
+    best_model = min(model_performance[fund], key=model_performance[fund].get)
+    # Ajouter le meilleur modèle au dictionnaire
+    model_performance[fund]['Best Model'] = best_model
+    
+performance_df = pd.DataFrame(model_performance).T
+print(performance_df)
+
+#correlation_matrix = calculate_correlation_matrix(y_pred_lin_dict)  # Remplacez y_pred_lin_dict par le dictionnaire de rendements prédits approprié
+
+modeles_dict = {
+    'Régression Linéaire': y_pred_lin_dict,
+    'Ridge': y_pred_ridge_dict,
+    'Lasso': y_pred_lasso_dict,
+    'Elastic Net': y_pred_elastic_net_dict,
+    'MLP': y_pred_mlp_dict,
+    'RNN': y_pred_rnn_dict,
+    'LSTM': y_pred_lstm_dict
+}
+
+modeles_dict = {
+    'Régression Linéaire': y_pred_lin_dict,
+    'MLP': y_pred_mlp_dict,
+    'RNN': y_pred_rnn_dict,
+    'LSTM': y_pred_lstm_dict
+}
+
+'''
+for name_model, v in modeles_dict.items():
+    print('')
+    print('')
+    for key, array in v.items():
+        has_nan = np.isnan(array).any()
+        has_inf = np.isinf(array).any()
+    
+        if has_nan or has_inf:
+            print(f"Le tableau pour {key} contient des NaN ou des infinis.")
+            if has_nan:
+                print(f"  - NaN détecté dans {key}")
+            if has_inf:
+                print(f"  - Infini détecté dans {key}")
+        else:
+            print(f"Le tableau pour {key} ne contient ni NaN, ni infinis.")
+'''
+# Assembler les rendements prédits dans une matrice
+for name_model, model_reg in modeles_dict.items():
+    
+    predicted_returns = np.array([model_reg[fund] for fund in actions]).T
+    # Calculer la matrice de covariance des rendements prédits
+    covariance_matrix = np.cov(predicted_returns, rowvar=False)
+    
+    # Calculer les rendements moyens pour chaque action
+    mean_returns = np.mean(predicted_returns, axis=0)
+    
+    # Utiliser la fonction d'optimisation définie précédemment
+    optimized_weights = optimize_portfolio(mean_returns, covariance_matrix)
+    
+    # Afficher la matrice de covariance
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(covariance_matrix, annot=True, fmt='.2f', cmap='coolwarm', xticklabels=actions, yticklabels=actions)
+    plt.title('Matrice de Covariance des Rendements Prédits')
+    plt.show()
+    
+    Y = pd.DataFrame(predicted_returns,columns=actions)
+    
+    # Select method and estimate input parameters:
+    method_mu='hist' # Method to estimate expected returns based on historical data.Quelle méthde utilisé pour estimé les expecteds retours (historical, ewm, James-Stein estimator, etc...) - https://riskfolio-lib.readthedocs.io/en/latest/portfolio.html?highlight=assets_stats
+    method_cov='hist' # Method to estimate covariance matrix based on historical data.Quelle méthode uytilisé pour estimé la covariance ( hist, ewma,...)
+    
+    # Estimate optimal portfolio:
+    
+    model='Classic' # Could be Classic (historical), BL (Black Litterman) or FM (Factor Model)
+    obj = 'Sharpe' # Objective function, could be MinRisk, MaxRet, Utility or Sharpe
+    hist = True # Use historical scenarios for risk measures that depend on scenarios
+    rf = 0 # Risk free rate
+    l = 0 # Risk aversion factor, only useful when obj is 'Utility'
+    coef_ewma = 0.94 #proche de 1, cela signifie que les observations récentes ont un poids beaucoup plus élevé. 0.94 est souvent utilisé pour ewma
+    rm = 'MV' # Risk measure used, this time will be variance POUR les 3 ers graphs
+    
+    
+    '''
+    1er graph : Optimization du portefeuille par rapport à la sharpe mean variance, 2ème graph : frontier efficient, 3ème graph : répartition de la composition de la frontier
+    '''
+    port = rp.Portfolio(returns=Y)  # Y est votre DataFrame de rendements prédits
+    port.assets_stats(method_mu=method_mu, method_cov=method_cov)
+    
+    points = 50 # Number of points of the frontier
+    frontier = port.efficient_frontier(model=model, rm=rm, points=points, rf=rf, hist=hist)
+    label = 'Max Risk Adjusted Return Portfolio' # Title of point
+    mu = port.mu # Expected returns
+    cov = port.cov # Covariance matrix
+    returns = port.returns # Returns of the assets
+    w = port.optimization(model=model, rm=rm, obj=obj, rf=rf, l=l)
+    
+    frontier = port.efficient_frontier(model=model, rm=rm, points=points, rf=rf)
+    
+    
+    # Création d'une figure avec une grille de 2x3 sous-graphiques
+    fig, axes = plt.subplots(nrows=2, ncols=3, figsize=(34, 12))
+    
+    # Ajustement des espacements
+    plt.subplots_adjust(hspace=1.2, wspace=0.4)
+    fig.suptitle(name_model, fontsize=20)
+
+    title_size = 14
+
+    # 1er graphique : Sharpe Mean Variance
+    ax1 = rp.plot_pie(w=w, title='Sharpe Mean Variance', others=0.05, nrow=25, cmap="tab20", ax=axes[0,0])
+    ax1.set_title('Sharpe Mean Variance - '+name_model, fontsize=title_size)
+
+    # 2ème graphique : Frontière efficiente
+    ax2 = rp.plot_frontier(w_frontier=frontier, mu=mu, cov=cov, returns=returns, rm=rm, rf=rf, alpha=0.05, cmap='viridis', w=w, label=label, marker='*', s=16, c='r', ax=axes[0,1])
+    
+    # 3ème graphique : Composition de la frontière efficiente
+    ax3 = rp.plot_frontier_area(w_frontier=frontier, cmap="tab20", ax=axes[0,2])
+    
+    
+    
+    '''
+    4ème graph : Optimization du portefeuille par rapport à la sharpe mean CVaR, 5ème graph : frontier efficient avec la rm1,  6ème graph : répartition de la composition de la frontier
+    '''
+    
+    rm = 'CVaR' # Risk measure POUR les  graphs 4 à 6
+    w = port.optimization(model=model, rm=rm, obj=obj, rf=rf, l=l, hist=hist)
+    label = 'Max Risk Adjusted Return Portfolio' # Title of point
+    frontier = port.efficient_frontier(model=model, rm=rm, points=points, rf=rf, hist=hist)
+    
+    
+    
+    # 4ème graphique : Sharpe Mean CVaR
+    ax4 = rp.plot_pie(w=w, title='Sharpe Mean CVaR', others=0.05, nrow=25, cmap="tab20", ax=axes[1,0])
+    
+    # 5ème graphique : Frontière efficiente avec CVaR
+    ax5 = rp.plot_frontier(w_frontier=frontier, mu=mu, cov=cov, returns=returns, rm='CVaR', rf=rf, alpha=0.05, cmap='viridis', w=w, label=label, marker='*', s=16, c='r', ax=axes[1,1])
+    
+    # 6ème graphique : Composition de la frontière efficiente avec CVaR
+    ax6 = rp.plot_frontier_area(w_frontier=frontier, cmap="tab20", ax=axes[1,2])
+    
+    # Affichage de la figure complète
+    plt.show()
+
+
+
+
+
+
+
